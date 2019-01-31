@@ -1,0 +1,205 @@
+---
+title: "Customer Segmentation / Clustering"
+author: "Jenny Listman"
+date: "1/30/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Clustering/Customer Segmentation Challenge
+
+Enough unlinked/uncorrelated variables can allow you to cluster a datset, but determining the most likely number of clusters is another problem. In addition, it's useful to identify variables that define clusters and that are likely to be actionable.
+
+After cleaning the dataset, I transformed and scaled appropriate variables. I then visualized the distributions of each variable as well as relationships between pairs of variables. I identified pairs of variables that were highly correlated and removed one from each pair. 
+
+I used k-means clustering on the dataset of uncorrelated (less correlated than my cutoff) variables, forming numbers of clusters from K = 2 to 10. I used a consensus of 26 measurements that can help choose the best K. I then tried another method, the gap statistic, which is more computationally instensive than the other 26 methods, but tests each K against simulated null distributions from the dataset. 
+
+While there's no clear winner for K to partition these data into clusters, using the consensus value for K, I created a table of summary statistics for customers in each cluster to characterize customer behavior for each cluster.
+
+# R code and results
+
+load packages needed
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse) ## manipulating and visualizing data (plyr, purrr, ggplot2, knitr...)
+library(readr) ## read in csv files faster
+library(kableExtra) ## make nice tables with wrapper for kable()
+library(cluster)    ## clustering algorithms and gap statistic
+library(factoextra) ## visualization of clustering algorithm results
+library(GGally) ## create matrix of variable plots
+library(NbClust) ## clustering algorithms and identification of best K
+library(caret) ## find correlated variables
+```
+
+Import data downloaded from https://www.kaggle.com/arjunbhasin2013/ccdata
+
+```{r, message = FALSE, warning = FALSE}
+cc_data <- read_csv("../data/CC GENERAL.csv",header=TRUE)
+```
+
+View and summarize variables to see what I'm dealing with, identify variables that will have to be transformed, scaled or changed from one class to another, look for missingness, possible errors.
+
+```{r, message = FALSE, warning = FALSE}
+
+glimpse(cc_data) ## show variable names, variable class, and examples of data in each column
+
+summary(cc_data) ## get min, max, median, mean, # of NAs for each variable
+
+```
+glimpse() and summary() show
+
+1. All variables are numeric other than `CUST_ID` which will be removed for clustering, anyway.
+
+2. `TENURE` variable (we assume this means #months from 1 to 12) has a small number of values that are not `12`. I'm going to remove rows for customers with `TENURE` < `12` so that all data are based on 1 year's worth of customer behavior. Then remove this variable from the dataset.
+
+3. I'll remove rows that have missing values for `CREDIT_LIMIT` and `MINIMUM_PAYMENTS`. No other variables have missing values.
+
+4. Some variables are skewed so should be log transformed.
+`BALANCE`, `PURCHASES`, `ONEOFF_PURCHASES`, `INSTALLMENTS_PURCHASES`, `CASH_ADVANCE`, `CASH_ADVANCE_TRX`, `PURCHASES_TRX`, `CREDIT_LIMIT`, `PAYMENTS`, `MINIMUM_PAYMENTS` 
+
+5. Scale everything
+
+
+```{r, message = FALSE, warning = FALSE}
+
+transformed_variables <- c("BALANCE", "PURCHASES", "ONEOFF_PURCHASES", "INSTALLMENTS_PURCHASES", "CASH_ADVANCE", "CASH_ADVANCE_TRX", "PURCHASES_TRX", "CREDIT_LIMIT", "PAYMENTS", "MINIMUM_PAYMENTS" ) # vector of variables to be log transformed
+
+clustering_data <- cc_data %>%                                  # preserve original dataset
+  filter(TENURE == 12) %>%                                      # remove rows w < 12 mos. of data
+  .[,-c(18)] %>%                                                # remove TENURE variable
+  na.omit() %>%                                                 # remove rows w missing values
+  mutate_at(vars(transformed_variables), funs(log(1 + .))) %>%  # add 1 to each value to avoid log(0)
+  mutate_at(c(2:17), funs(c(scale(.))))                         # scale all numeric variables to mean of 0 & sd = 1
+  
+
+```
+
+Visualize variables with density plots of each variable, separaetly and correlation plots between variable pairs. Correlation plots, while hard to see in detail and only in 2-D, don't help any clustering patterns stand out. Everything looks like a gradient. 
+
+
+```{r, message = FALSE, warning = FALSE}
+
+plots <- as.data.frame(clustering_data[,-c(1)]) %>%
+  gather() %>%                             # make key-value pairs
+  ggplot(aes(value)) +                     # values for each variable on x-axis
+    facet_wrap(~ key, scales = "free") +  
+    geom_density() +                       # plot each as density
+  theme(strip.text = element_text(size=5)) # shrink text size
+
+plots                                      # print plots
+
+corr_plots <- ggpairs(as.data.frame(clustering_data[,-c(1)]),                        # GGally::ggpairs to make correlation plots
+                      lower = list(continuous = wrap("points", 
+                                                     alpha = 0.3, size=0.1), # default point size too big-shrink & change alpha
+                                   combo = wrap("dot", alpha = 0.4,size=0.2)
+                                   )
+                      )
+
+corr_plots                                 # print corr_plots 
+```
+
+
+
+Look for correlated variables before analyzing. For variable pairs that have greater than a given cutoff value for correlation coefficient, remove one from data set. I chose 0.6 as the cutoff. 
+
+The reduced dataset has 8 variables instead of 16.
+
+```{r, message = FALSE, warning = FALSE}
+corr_values <- cor(clustering_data[,-1]) # calculate correlation values between variable pairs
+
+corr_values %>%                          # look at corellation coefficients in a table
+  as.data.frame() %>%
+  kable(digits = 3) %>%
+  kable_styling(font_size = 9) 
+
+above_cutoff <- findCorrelation(corr_values,  # use correlation matrix to find variable pairs > cutoff 
+                                names = TRUE, # make vector of variable names to remove
+                                cutoff= 0.6)  # I chose 0.6 as cutoff
+
+reduced_data <- clustering_data %>%   # make dataset keeping uncorrelated variables, only
+  column_to_rownames("CUST_ID") %>%  # maintain customer ID by transferring this column to rownames
+  select(-one_of(above_cutoff))      # remove one of each from variable pairs > cutoff
+
+cbind(names(reduced_data), above_cutoff) %>%  # view variables kept and removed in a table
+  kable(col.names = c("Variables Retained", "Variables Removed")) %>%
+  kable_styling(font_size = 9, full_width = FALSE)
+
+ 
+```
+Using the dataset `reduced_data` that has correlated variables removed, I used `NbClust` to assign each customer to a cluster, assuming cluster values of 2 to 10. `NbClust` calculates 26 indices to choose the best K and gives the most likely K, based on consensus. Taking the most likely number of clusters K=4, `NbClust` also provides the cluster assignment for each customer. I added this assingment back to the original, untransformed, unscalsed dataset `cc_data` as a variable.
+
+```{r, message = FALSE, warning = FALSE}
+set.seed(123)
+
+nc_reduced <- NbClust(reduced_data, min.nc=2, max.nc=10, method="kmeans")
+
+table(nc_reduced$Best.n[1,])
+
+nc_reduced$All.index # estimates best number of clusters from 26 indeces of model fit
+
+barplot(table(nc_reduced$Best.n[1,]),
+xlab="Number of Clusters Reduced", ylab="Number of Criteria",
+main="Number of Clusters Reduced Chosen by Criteria")
+
+clustered_data <- cc_data %>%  # add cluster assingment as variable to original dataset
+  merge(as.data.frame(nc_reduced$Best.partition) %>%
+          rownames_to_column(),
+        by.x = "CUST_ID", by.y = "rowname", all = TRUE)
+
+```
+
+`NbClust` does not use the time-consuming gap statistic as one of its 26 measurements, but I prefer gap statistic for this purpose, since it compares against simulated null distributions. 
+
+Using the dataset `reduced_data` that has correlated variables removed, with `cluster::clusGap` calculate gap statistic for clusters (K) = 1 to 10 against 500 simulated datasets that meet the null hypothesis. Based on `cluster::clusGap` the null hypothesis can not be rejected, so the most likely number of clusters = 1 ; variation in this population of credit card users exists on a gradient. It is one blob. 
+
+```{r, message = FALSE, warning = FALSE}
+set.seed(123) # set seed for replicability
+gap_stat_reduced <- clusGap(as.data.frame(reduced_data), # calculate gap statistic for clusters (K) = 1 to 10 against 500 simulated datasets that meet the null hypothesis
+                    FUN = kmeans, nstart = 25,         
+                    K.max = 10, B = 500, d.power = 2) 
+
+fviz_gap_stat(gap_stat_reduced) # visualize the gap statistic to see where it plateaus to identify the most likely K
+
+
+
+```
+
+If we assume that K = 4 has some reasonable interpretation for a business that would want to use these data, produce summary stats for customers in each cluster to see if we can characterize the clusters in some meaningful way.
+
+There are four reasonable profiles that appear if you look at median stats. Credit card customers who:
+
+Cluster 1. spend a low amount, take low to no cash advances, and carry a high (compared to cluster 2) balance
+
+Cluster 2. spend a low amount, take low to no cash advances, and carry a low (compared to cluster 1) balance
+
+Cluster 3. spend a low amount, take large cash advances, and carry a high balance
+
+Cluster 4. spend a high amount, take low to no cash advances, and carry a low balance
+
+
+```{r, message = FALSE, warning = FALSE}
+
+clustered_data[,-1] %>%    # don't need customer id
+  na.omit() %>% 
+  group_by(`nc_reduced$Best.partition`) %>% 
+  summarise_all(funs(mean = mean, median = median, sd = sd)) %>% 
+  as.data.frame() %>%
+  kable() %>%
+  kable_styling(font_size = 9) # get mean, median, and sd for each variable for each customer cluster 
+
+  
+
+
+```
+
+
+
+#6. Discussion
+
+Sometimes, variation within a population is distributed across a gradient rather than as discreet clusters. Using k-means clustering on a dataset combined with various measures that attempt to identify a reasonable number of clusters, you can get an answer, but it then takes some common sense to figure out what to do with the answer. The `NbClust` function indicates that for the credit card dataset, the most reasonable number of clusters chosen by 5 indices is K=4. However, K = 2, 3, and 9 were each chosen by 4 indices, so K=4 is not a clear winner. When looking at summary customer stats for each cluster for K = 4, there is some sense to it. This might also be the case for K = 2, 3, and 9 but with different characterizations of the clusters.
+
+`NbClust` does not use the time-consuming gap statistic as one of its 26 measurements, but gap statistic is my favorite for this purpose, since it compares against simulated null distributions. When using `cluster::clusGap`, which does use the gap statistic, the null hypothesis can not be rejected, so the most likely number of clusters = 1 ; variation in this population of credit card users exists on a gradient. Technically, it is one blob. 
+
+Still, it is reasonable to choose some values for K > 1 that stand out in order to segment the customers, but these values should be based on some measurement that a business is trying to optimize. That's not directly available here, but if we assume that credit card companies want to make money off of interest while mitigating risk, K = 4 is helpful. A variable indicating whether or not customers miss payments (risk) would probably improve things.
+
